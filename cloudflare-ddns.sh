@@ -19,10 +19,12 @@
 # }
 #
 # Configuration file location can be overridden by setting the CONFIG environment variable.
+# Set the DEBUG environment variable to print responses from the CloudFlare API.
 
 set -euo pipefail
 
 fail() { echo "$*" 2>&1; exit 1; }
+debug() { if [[ -n ${DEBUG:-} ]]; then local val="$1"; shift; printf '\n%s: %s\n' "$val" "$*"; fi }
 assert_notempty() { [[ -n ${!1} ]] || fail "${2:-Value for $1 can not be empty, failing}"; }
 alias curl="curl --fail --silent --show-error"
 
@@ -39,21 +41,39 @@ assert_notempty RECORD
 TOKEN="$(jq -r '.token' "$CONFIG")"
 assert_notempty TOKEN
 
-IP="$(dig +short myip.opendns.com @resolver1.opendns.com)"
-if [[ -z $IP ]]; then
+ip="$(dig +short myip.opendns.com @resolver1.opendns.com)"
+if [[ -z $ip ]]; then
   echo "Failed to get public IP from OpenDNS, trying Google"
-  IP="$(dig TXT +short o-o.myaddr.l.google.com @ns1.google.com | tr -d '"')"
+  ip="$(dig TXT +short o-o.myaddr.l.google.com @ns1.google.com | tr -d '"')"
   assert_notempty IP "Failed to get public IP from OpenDNS or Google"
 fi
 
+# Get zone info
+zone="$(curl -X GET "$API_URL/zones?name=$DOMAIN" -H "Authorization: Bearer $TOKEN" -H "Content-Type:application/json")"
+debug "Zone info" "$zone"
+
 # Get zone ID for domain
-ZONE_ID="$(curl -X GET "$API_URL/zones?name=$DOMAIN" -H "Authorization: Bearer $TOKEN" -H "Content-Type:application/json" | jq -r '.result[0].id')"
-assert_notempty ZONE_ID "Failed to retrieve zone ID for $DOMAIN from CloudFlare"
+zone_id="$(jq -r '.result[0].id' <<< "$zone")"
+assert_notempty zone_id "Failed to retrieve zone ID for $DOMAIN from CloudFlare"
+
+# Get record info
+record_info="$(curl -X GET "$API_URL/zones/$zone_id/dns_records?name=$RECORD" -H "Authorization: Bearer $TOKEN" -H "Content-Type:application/json")"
+debug "Current record" "$record_info"
+
+old_ip="$(jq -r '.result[0].content' <<< "$record_info")"
+debug "Current IP is" "$old_ip"
 
 # Get record for subdomain
-RECORD_ID="$(curl -X GET "$API_URL/zones/$ZONE_ID/dns_records?name=$RECORD" -H "Authorization: Bearer $TOKEN" -H "Content-Type:application/json" | jq -r '.result[0].id')"
-assert_notempty RECORD_ID "Failed to retrieve record ID for $RECORD from CloudFlare"
+record_id="$(jq -r '.result[0].id' <<< "$record_info")"
+assert_notempty record_id "Failed to retrieve record ID for $RECORD from CloudFlare"
 
 # Update record with current IP
-curl -X PATCH "$API_URL/zones/$ZONE_ID/dns_records/$RECORD_ID" -H "Authorization: Bearer $TOKEN" -H "Content-Type:application/json" --data "{\"content\": \"$IP\"}" || fail "Failed to update DNS for $RECORD"
+new_record="$(curl -X PATCH "$API_URL/zones/$zone_id/dns_records/$record_id" -H "Authorization: Bearer $TOKEN" -H "Content-Type:application/json" --data "{\"content\": \"$ip\"}" || fail "Failed to update DNS for $record_info")"
+debug "New record" "$new_record"
+
+if [[ $old_ip != "$ip" ]]; then
+  echo "Successfully updated $RECORD to point at $ip"
+else
+  echo "DNS record $RECORD has not changed, points to $ip"
+fi
 
