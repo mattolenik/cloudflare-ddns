@@ -1,0 +1,5 @@
+{
+  "domain": "mydomain.com",
+  "record": "sub.mydomain.com",
+  "token":  "cloudflare-api-token-here"
+}
